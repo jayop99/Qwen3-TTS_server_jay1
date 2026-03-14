@@ -6,7 +6,6 @@ FROM ${DOCKER_FROM} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -21,40 +20,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create virtual environment
+# create virtualenv
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Upgrade pip
-RUN pip install --no-cache-dir --upgrade pip wheel setuptools
+RUN pip install --upgrade pip wheel setuptools
 
-# Install PyTorch with CUDA 12.8 (required for RTX 5090/Blackwell sm_120)
-RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+# install torch
+RUN pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 
-# Install Python dependencies
+# install requirements
 COPY requirements.txt /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
 
-# Install flash-attention from pre-built wheel (PyTorch 2.10 + CUDA 12.8 + Python 3.10)
-RUN pip install --no-cache-dir https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.12/flash_attn-2.6.3+cu128torch2.10-cp310-cp310-linux_x86_64.whl || true
+# install flash attention
+RUN pip install https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.12/flash_attn-2.6.3+cu128torch2.10-cp310-cp310-linux_x86_64.whl || true
 
-# Pre-download models to cache them in the image using snapshot_download for complete downloads
-# This ensures ALL files are downloaded, including the speech_tokenizer subdirectory
+# download models
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-1.7B-Base')"
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-Tokenizer-12Hz')"
 RUN python -c "import whisper; whisper.load_model('base')"
 
 # =============================================================================
-# Stage 2: Runtime - Minimal image with only runtime dependencies
+# Stage 2: Runtime
 # =============================================================================
 FROM ${DOCKER_FROM} AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-LABEL maintainer="Qwen3-TTS Server"
-LABEL description="Drop-in replacement for F5-TTS server using Qwen3-TTS"
-
-# Install only runtime dependencies (no build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -66,36 +59,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     git-lfs \
     && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean \
     && git lfs install
 
-# Copy virtual environment from builder
+# copy venv
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy cached models from builder (HuggingFace cache)
-# Models are stored in /root/.cache/huggingface and /root/.cache/whisper
+# copy cached models
 COPY --from=builder /root/.cache /root/.cache
 
-ENV SHELL=/bin/bash
 ENV PYTHONUNBUFFERED=1
 
-# Create necessary directories in /app (not /workspace which RunPod uses for network volumes)
-RUN mkdir -p /app/server/outputs /app/server/resources
+# create working directory
+WORKDIR /app
 
-# Copy server files to /app
-COPY server.py /app/server/
-COPY start.sh /app/server/
-COPY demo_speaker0.mp3 /app/server/resources/
+# copy project files
+COPY server.py .
+COPY handler.py .
+COPY demo_speaker0.mp3 .
 
-# Fix line endings and make executable
-RUN sed -i 's/\r$//' /app/server/start.sh \
-    && chmod +x /app/server/start.sh
-
-WORKDIR /app/server
-
-# Expose the server port
+# expose port optional
 EXPOSE 7860
 
-# Set the entrypoint
-ENTRYPOINT ["/bin/bash", "/app/server/start.sh"]
+# run runpod serverless handler
+CMD ["python", "handler.py"]
